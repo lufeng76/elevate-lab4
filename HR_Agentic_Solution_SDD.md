@@ -8,7 +8,7 @@
 | Attribute | Value |
 | :--- | :--- |
 | **Document Title** | Software Design Document: HR Agentic Solution (MVP 1) |
-| **Document Version** | 1.1.0 |
+| **Document Version** | 1.2.0 |
 | **Status** | Approved / Ready for Implementation |
 | **Author** | Senior AI Software Architect |
 | **Target Baseline** | Business Requirements Document (BRD) - HR Agentic Solution (MVP 1) |
@@ -89,6 +89,7 @@ By leveraging modern Large Language Model (LLM) reasoning capabilities paired wi
 
 ## 3. High-Level System Architecture
 
+### 3.1. Layered Architecture Overview
 The solution adopts a modular, layered service-oriented architecture comprising an Ingress Layer, Safety & Governance Layer, Agent Orchestration Core, Retrieval & Tool Adapters, and Enterprise Backend Systems.
 
 ```mermaid
@@ -562,6 +563,45 @@ classDiagram
 
 ---
 
+#### 6.1.3. API Throttling & Rate-Limiting Thresholds
+To protect WorkWeek HCM from request flooding and comply with enterprise API tenant contracts, the WorkWeek Adapter implements a client-side **Token Bucket** rate-limiting controller:
+
+| Throttling Dimension | Configured Quota / Threshold | Enforcement Mechanism |
+| :--- | :--- | :--- |
+| **Sustained Rate Limit** | **120 requests/minute** (2.0 RPS avg) | Client-side Redis Token Bucket limiter (`adapter:workweek:rate_bucket`) |
+| **Burst Concurrency Ceiling** | **Max 20 requests/second** | In-memory Semaphore per container instance |
+| **Upstream Throttling Code** | `HTTP 429 Too Many Requests` | Adapter intercepts 429, extracts `Retry-After` header (default backoff: $3.0\text{s}$) |
+| **Client Queue Buffering** | Max 100 queued calls, 5s timeout | Non-interactive background calls queue; user requests fail fast with status message |
+
+```python
+# Adaptive Rate Limiting & Throttling Controller
+class WorkWeekThrottler:
+    def __init__(self, redis_client, rate_limit_rpm=120, burst_limit=20):
+        self.redis = redis_client
+        self.rate_limit_rpm = rate_limit_rpm
+        self.burst_limit = burst_limit
+
+    async def acquire_permit(self, timeout_ms=3000) -> bool:
+        # Token bucket algorithm: consume token or wait up to timeout_ms
+        token_acquired = await self.redis.evalsha(TOKEN_BUCKET_SHA, keys=["workweek_tokens"], args=[self.rate_limit_rpm, self.burst_limit])
+        if not token_acquired:
+            raise RateLimitExceededException("WorkWeek API rate threshold reached. Request deferred.")
+        return True
+```
+
+#### 6.1.4. WorkWeek 5xx Error-Handling & Resilience Matrix
+When WorkWeek experiences downstream failures, the adapter differentiates between **idempotent reads** (profile, PTO balance) and **non-idempotent transactional writes** (leave submission, contact update):
+
+| HTTP Status | Error Scenario | Adapter Recovery Protocol | User-Facing Sanitized String |
+| :--- | :--- | :--- | :--- |
+| **`500 Internal Server Error`** | Unhandled internal exception in WorkWeek | Retries 2x with jittered exponential backoff ($200\text{ms}, 400\text{ms}$). If persistent, trips circuit breaker after 5 failures in 30s. | `"WorkWeek is currently experiencing technical difficulties. Your request has not been processed. Please retry in a few minutes."` |
+| **`502 Bad Gateway`** | Reverse proxy or ALB failure upstream of WorkWeek | Immediate retry after $500\text{ms}$. If unresolved, aborts turn and notifies PagerDuty. | `"The connection to WorkWeek is temporarily disrupted. Please try again shortly."` |
+| **`503 Service Unavailable`** | WorkWeek maintenance window or capacity overload | Checks `Retry-After`. Circuit breaker trips immediately to `OPEN` state. Fast-fails subsequent calls. | `"Our HR system (WorkWeek) is undergoing scheduled maintenance. Please check back later or contact HR directly for urgent leave."` |
+| **`504 Gateway Timeout` (On Read)** | Query timeout ($>5000\text{ms}$) fetching employee profile / PTO | Aborts query; logs warning. Falls back to last verified user context in session token if available. | `"WorkWeek took too long to return your leave balance. Please retry your inquiry in a few moments."` |
+| **`504 Gateway Timeout` (On Write)** | Timeout ($>8000\text{ms}$) on `submit_leave` | **DO NOT blindly retry.** Injects `Idempotency-Key: saga-<uuid>-step1`. Dispatches reconciliation prober to verify if record was created before attempting rollback. | `"Your leave request submission timed out. We are verifying its status with WorkWeek to avoid duplicate booking. You will receive an email confirmation shortly."` |
+
+---
+
 ### 6.2. ServiceImmediately (ITSM) Adapter Specification
 
 #### 6.2.1. Incident Lifecycle State Machine
@@ -580,6 +620,27 @@ stateDiagram-v2
 
 #### 6.2.2. Duplication & Spam Prevention
 * Prior to executing `create_incident`, the adapter queries active tickets for `requestor_employee_id` created within the last 15 minutes. If a matching ticket with the same `category` and similar `short_description` (cosine similarity $> 0.85$) exists, ticket creation is halted with an alert to the user.
+
+---
+
+#### 6.2.3. API Throttling & Rate-Limiting Thresholds
+ServiceImmediately ITSM enforces tenant-level rate governance to ensure core IT service desk stability:
+
+| Throttling Dimension | Configured Quota / Threshold | Enforcement Mechanism |
+| :--- | :--- | :--- |
+| **Sustained Rate Limit** | **200 requests/minute** (3.33 RPS avg) | Distributed Token Bucket in Redis with priority lanes |
+| **Burst Concurrency Ceiling** | **Max 30 requests/second** | Distributed semaphore across orchestrator worker pool |
+| **Priority Scheduling** | Critical P1/P2 incidents bypass queue | Priority queue: P1/P2 incidents assigned dedicated burst headroom |
+| **Rate Limit Response** | `HTTP 429 Too Many Requests` | Parses `X-RateLimit-Reset-Time`; pauses low-priority comment polling |
+
+#### 6.2.4. ServiceImmediately 5xx Error-Handling & Resilience Matrix
+
+| HTTP Status | Error Scenario | Adapter Recovery Protocol | User-Facing Sanitized String |
+| :--- | :--- | :--- | :--- |
+| **`500 Internal Error`** | ITSM database lock or script error | Retries 3x with exponential backoff ($300\text{ms}, 600\text{ms}, 1200\text{ms}$). If on ticket create, queues payload to Dead-Letter Queue (DLQ). | `"Unable to register your support ticket in ServiceImmediately due to a system error. HR Operations has been alerted to create your ticket manually."` |
+| **`502 Bad Gateway`** | Ingress proxy failure into ITSM cloud | Retries 1x after $1000\text{ms}$. If failed, aborts and logs incident to local audit sink. | `"ServiceImmediately is currently unreachable. Please try submitting your request again in a few moments."` |
+| **`503 Unavailable`** | ITSM platform maintenance or rate exhaustion | Trips circuit breaker to `OPEN`. Automatically converts interactive ticket creation into an offline buffered task. | `"ServiceImmediately is temporarily unavailable for scheduled maintenance. Your request has been queued and will be processed once systems resume."` |
+| **`504 Gateway Timeout`** | Ticket creation timeout ($>6000\text{ms}$) | Checks ticket existence by querying `requestor_employee_id` and `automation_origin` hash before retrying. Prevents duplicate ticket spam. | `"Your support ticket request took longer than expected. We are confirming whether ticket INC was created to prevent duplicates. Please check your open tickets in 2 minutes."` |
 
 ---
 
@@ -615,6 +676,63 @@ flowchart LR
     "content": "Employees are eligible for up to 5 consecutive business days of paid bereavement leave..."
   }
   ```
+
+---
+
+---
+
+### 6.4. Real-Time Role Revocation & Vector Access Control Synchronization Pipeline
+
+To guarantee enterprise compliance, prevent unauthorized data access, and maintain strict data privacy, changes to employee authorization (e.g., role demotion, department transfer, suspension, or termination) in **WorkWeek** are synchronized in real-time to the agent's session layer and vector retrieval ACLs.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Admin as HR Administrator
+    participant WW as WorkWeek HCM
+    participant WH as Webhook Ingress (Eventarc / PubSub)
+    participant Sync as Identity & Access Sync Service
+    participant Redis as Session Store (Redis)
+    participant RAG as Vector DB & Policy Engine
+
+    Admin->>WW: Revoke Role / Terminate Employee (emp_88392)
+    WW->>WH: POST /api/v1/webhooks/workweek (HMAC-SHA256 Signed)
+    Note over WW,WH: Event: employee.role.revoked {emp_id, revoked_roles, timestamp}
+    WH->>Sync: Validate Signature & Ingest Event (<50ms)
+    
+    par Invalidate Active User Sessions
+        Sync->>Redis: Invalidate User Active Sessions (DEL sess:emp_88392:*)
+        Sync->>Redis: Publish Revocation to Token Blacklist Cluster (TTL: 1 hour)
+        Redis-->>Sync: Session & Token Purged (<20ms)
+    and Update Vector Retrieval ACLs
+        Sync->>RAG: Invalidate Cached User Attribute Permissions
+        Sync->>RAG: Update User Role Mapping in Dynamic ACL Cache
+        RAG-->>Sync: ACL Updated (<30ms)
+    end
+
+    Note over Sync: Total End-to-End Revocation Propagation: < 500ms
+
+    opt Employee attempts request with stale client token
+        actor Emp as Revoked Employee
+        Emp->>Redis: POST /api/v1/chat {token}
+        Redis-->>Emp: HTTP 401 Unauthorized ("Credentials revoked. Please re-authenticate.")
+    end
+```
+
+#### 6.4.1. Real-Time Attribute-Based Access Control (ABAC) in RAG
+To prevent costly, slow vector re-embedding whenever employee roles change, access control is decoupled from vector storage through **Runtime ABAC Metadata Filtering**:
+1. **Document Policy Ingestion Tagging**: Every chunk in `pgvector` contains authorization metadata:
+   ```json
+   {
+     "chunk_id": "pol-exec-comp-012",
+     "required_clearance": "Executive",
+     "allowed_roles": ["Executive", "HR_Director"],
+     "restricted_departments": ["Legal", "Executive_Office"]
+   }
+   ```
+2. **Query-Time Enforcement**: During semantic retrieval, the agent orchestrator dynamically injects the employee's verified active roles retrieved from the identity context:
+   $$\text{Filter} = (\text{chunk.allowed\_roles} \cap \text{ActiveUserRoles} \ne \emptyset) \land (\text{ActiveUserClearance} \ge \text{chunk.required\_clearance})$$
+3. **Instantaneous Revocation Impact**: When a role is revoked in WorkWeek, the user's active role attributes are updated in Redis in $<500\text{ms}$. Subsequent queries by that user instantly evaluate against the updated role set, blocking access to restricted policy passages with **zero vector indexing lag**.
 
 ---
 
@@ -846,6 +964,71 @@ All user actions, tool executions, safety blocks, and LLM reasoning completions 
 
 ---
 
+---
+
+### 9.3. GDPR Compliance, User Data Rights & Automated Purging Architecture
+
+To satisfy General Data Protection Regulation (GDPR Article 17 "Right to be Forgotten", Article 15 "Right of Access") and enterprise data privacy mandates, the system enforces automated data retention lifecycles, cryptographic pseudonymization, and programmatic purge workflows.
+
+```mermaid
+flowchart TD
+    subgraph Trigger ["Purge / Privacy Triggers"]
+        Req["GDPR Article 17 Erasure Request (DPO / User API)"]
+        Cron["Automated Nightly Purge (Kubernetes CronJob)"]
+    end
+
+    subgraph Purge_Coordinator ["Data Erasure Orchestrator"]
+        Controller["Privacy Controller (/api/v1/compliance/purge-user)"]
+        AuditRecorder["Immutable Deletion Audit Logger"]
+    end
+
+    subgraph Target_Datastores ["Target Storage Layers"]
+        RedisStore[("Active Redis Sessions")]
+        ElasticAudit[("Elasticsearch Audit Logs")]
+        GCSArchive[("GCS Cold Storage WORM Archives")]
+        KMSKeys[("KMS Per-User Encryption Keys")]
+    end
+
+    Req -->|HTTP POST Signed Request| Controller
+    Cron -->|Daily at 02:00 UTC| Controller
+    
+    Controller -->|1. Flush Active State| RedisStore
+    Controller -->|2. Crypto-Shredding| KMSKeys
+    Controller -->|3. Mask & Delete User Logs| ElasticAudit
+    Controller -->|4. Tombstone Deletion Event| GCSArchive
+    Controller -->|5. Log Cryptographic Proof| AuditRecorder
+```
+
+#### 9.3.1. GDPR "Right to be Forgotten" API Contract (`POST /api/v1/compliance/purge-user`)
+Enterprise Data Protection Officers (DPOs) or automated enterprise privacy portals invoke the purge endpoint:
+
+```json
+{
+  "request_id": "gdpr-del-88392-20260902",
+  "employee_id": "emp_8839201",
+  "requested_by": "dpo_officer@corp.internal",
+  "compliance_basis": "GDPR_ARTICLE_17_ERASURE",
+  "requested_at": "2026-09-02T10:00:00Z"
+}
+```
+
+#### 9.3.2. Multi-Tiered Purging & Crypto-Shredding Mechanisms
+1. **Tier 1: In-Memory & Active State Purge ($\le 500\text{ms}$)**:
+   * Direct deletion of all active conversation keys (`sess:emp_8839201:*`) from Redis.
+   * Invalidates any pending tool execution tokens in the Asynchronous Tool Dispatcher.
+2. **Tier 2: Cryptographic Shredding for Audit Logs ($\le 10\text{s}$)**:
+   * User conversational payloads and PII are encrypted at rest using per-employee Envelope Encryption keys managed in Cloud KMS (`kms/keys/users/emp_8839201`).
+   * Upon receiving an authorized erasure request, the KMS key for that employee is permanently destroyed (`DestroyCryptoKeyVersion`).
+   * **Result**: All encrypted historical conversational logs stored in immutable WORM archives (Elasticsearch/Cloud Storage) become instantaneously and irreversibly unrecoverable cryptographically, satisfying GDPR compliance without compromising the append-only integrity of system-level audit logs.
+3. **Tier 3: Structured Log Scrubbing & Pseudonymization**:
+   * Any unencrypted transactional metadata fields (`user_id`, `ip_address`, `home_address`) are updated to `[GDPR_PURGED_ANONYMIZED_USER]` via an automated Elasticsearch update-by-query batch script.
+4. **Tier 4: Automated Retention Expiration Lifecycle Engine**:
+   * Kubernetes CronJob (`LogPurgeCronJob`) runs nightly at 02:00 UTC.
+   * Purges all raw operational session records older than **90 days**.
+   * Transitions 90-day-old audit indices to cold archival storage with an immutable lifecycle policy of **365 days**, after which cold archives are automatically purged by Cloud Storage bucket retention policies.
+
+---
+
 ## 10. Resilience, Fault Tolerance & Sagas
 
 ### 10.1. Transient Fault Strategy (Circuit Breaker & Exponential Backoff)
@@ -861,7 +1044,35 @@ Internal system errors, HTTP 500 responses, and database stack traces are interc
 
 ---
 
-### 10.3. Formal Enterprise Risk Register & Mitigation Strategy
+---
+
+### 10.3. Consolidated Component Error-Handling & Fallback Matrix
+
+The following matrix provides an exhaustive, tabular mapping of specific component failures, network exceptions, and error triggers to exact system fallback behaviors, alerting protocols, and user-facing error strings:
+
+| Subsystem / Component | Failure Scenario / Trigger | System Fallback & Recovery Behavior | Internal Telemetry / Alerting | User-Facing Error Message (Exact UI String) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Ingress API Gateway** | Invalid / Malformed JSON body in `/api/v1/chat` | Rejects with `HTTP 400 Bad Request`. Request does not reach Agent Orchestrator. | Logs to API gateway error metrics counter. | `"Invalid request format. Please check your message syntax and try again."` |
+| **Ingress Gateway (Auth)** | Expired or invalid JWT bearer token | Rejects with `HTTP 401 Unauthorized`. Fast-fails request. | Emits security telemetry; increments invalid auth counter. | `"Your session has expired. Please refresh your browser or re-authenticate with SSO."` |
+| **Input Safety Filter** | Adversarial prompt injection detected ($P_{\text{inj}} > 0.85$) | Terminates turn immediately; blocks forward pass to LLM; logs sanitized payload. | Emits high-priority Security SOC event (`SEC_INJECTION_BLOCKED`). | `"I cannot process this request as it violates enterprise AI acceptable use policies."` |
+| **Input Safety Filter** | Out-of-scope query (e.g. personal finance, sports, coding) | Fast refusal without tool execution; guides user back to HR/IT domains. | Logs classified domain to conversation analytics. | `"I am designed exclusively to assist with company HR policies, PTO, and IT support. For other matters, please consult the employee portal."` |
+| **Agent Reasoning Core** | LLM API timeout ($>6.0\text{s}$) or rate exhaustion | Retries 1x on alternate model endpoint. If timeout persists, aborts reasoning. | Triggers PagerDuty alert if LLM 5xx rate $>2\%$ over 5 min. | `"The AI assistant is taking longer than expected to formulate a response. Please retry your inquiry in a few moments."` |
+| **Agent Reasoning Core** | Invalid JSON generated in tool call argument | Catches JSONDecodeError; executes reflection prompt: `"Your tool arguments were invalid JSON. Correct and retry."` (Max 1 retry). | Increments `agent_tool_schema_parse_error` metric. | *Transparent to user (healed internally in $<1.2\text{s}$). If fatal:* `"An internal error occurred while formatting your request. Please rephrase your question."` |
+| **Policy RAG (`pgvector`)** | Vector DB unreachable or connection pool exhausted | Falls back to keyword BM25 search on local in-memory policy cache; appends disclaimer. | PagerDuty high alert to Database Reliability Team. | `"I was able to retrieve policy information using keyword search, but detailed semantic cross-references are temporarily limited. [Policy Link]"` |
+| **Output Safety Filter** | Hallucination detected (Entailment score $<0.90$ on policy answer) | Suppresses ungrounded output candidate. Generates conservative grounded refusal. | Logs ungrounded generation candidate to Hallucination Review queue. | `"I found relevant leave policies, but I cannot verify the specific detail you requested with 100% confidence. Please review the official policy document directly: [Link]"` |
+| **Output Safety Filter** | Unmasked SPII detected in generated response candidate | `SPIIMasker` intercepts output; redacts SSN, phone, address with `[REDACTED_SPII]`. | Logs Critical Privacy Incident (`PRIVACY_SPII_LEAK_INTERCEPTED`). | `"Your request has been processed. Note: Personal sensitive information was redacted for security: [REDACTED_SPII]."` |
+| **WorkWeek Adapter** | `HTTP 429 Too Many Requests` (Throttled) | Pauses execution based on `Retry-After`; queues request in adapter buffer. | Increments `workweek_throttle_count` counter. | `"Our HR system is currently handling high inquiry volumes. Your request is queued and will complete momentarily."` |
+| **WorkWeek Adapter** | `HTTP 500 / 502 / 503` on PTO Balance Read | Retries 2x with jittered backoff. If persistent, trips circuit breaker to `OPEN`. | Emits `WORKWEEK_DOWN_ALERT` to Integration Slack channel. | `"WorkWeek is temporarily unavailable. We are unable to retrieve your current PTO balance right now. Please check back shortly."` |
+| **WorkWeek Adapter** | `HTTP 504 Timeout` on Leave Request Write | Injects idempotency key; initiates verification check before retrying. | Emits warning to HR Operations DLQ monitor. | `"Your leave request submission timed out. We are verifying its status with WorkWeek to prevent duplicate bookings. You will receive an email confirmation shortly."` |
+| **ServiceImmediately** | `HTTP 429 Too Many Requests` (Throttled) | Backs off non-critical comments; prioritizes P1 incident creation. | Logs warning to ITSM gateway dashboard. | `"IT Service Desk ticketing is experiencing elevated load. Processing your ticket..."` |
+| **ServiceImmediately** | `HTTP 500 / 503` on Incident Creation | Retries 3x with backoff. If failed, buffers payload to RabbitMQ/Cloud Tasks DLQ. | Dispatches task to manual HR Operations triage queue. | `"We could not immediately open your IT ticket due to system maintenance. A ticket creation task has been buffered and will be registered automatically once systems recover."` |
+| **ServiceImmediately** | Duplicate ticket detected (Similarity $>0.85$ in 15 min) | Halts ticket creation; retrieves existing matching ticket details and presents to user. | Increments `spam_prevention_deflected` counter. | `"You recently opened ticket INC123456 with a similar issue 8 minutes ago. You can track or update your existing ticket here: [Link]."` |
+| **Saga Coordinator** | Partial saga failure (e.g. WorkWeek OK, ServiceImmediately fails) | Initiates compensating transaction; logs to Audit Logger; alerts HR Operations. | PagerDuty trigger: `SAGA_PARTIAL_FAILURE_ALERT`. | `"Your leave was recorded in WorkWeek (ID: LV-90412), but our ticketing system encountered an error routing your IT notification. An HR Operations task has been generated to route this manually."` |
+| **Redis Session Store** | Redis cluster node failure / timeout | Graceful degradation: falls back to stateless single-turn execution using token claims. | High alert to Cloud Infrastructure Team. | `"Conversation history is temporarily operating in stateless mode due to cache maintenance. Multi-turn context may require re-stating earlier details."` |
+
+---
+
+### 10.4. Formal Enterprise Risk Register & Mitigation Strategy
 
 The following matrix documents identified project, technical, security, and operational risks along with pre- and post-mitigation risk assessments:
 
@@ -877,7 +1088,7 @@ The following matrix documents identified project, technical, security, and oper
 
 ---
 
-### 10.4. Known Unknowns & Technical Investigation Spikes
+### 10.5. Known Unknowns & Technical Investigation Spikes
 
 | Investigation Spike | Area of Uncertainty | Target Output / Resolution Plan | Timeline |
 | :--- | :--- | :--- | :--- |
@@ -887,7 +1098,7 @@ The following matrix documents identified project, technical, security, and oper
 
 ---
 
-### 10.5. External System Dependencies & Governance Approvals
+### 10.6. External System Dependencies & Governance Approvals
 
 | External System / Team | Dependency Description | Critical Path Date | Risk Level | Contact / Approver |
 | :--- | :--- | :--- | :---: | :--- |
@@ -901,6 +1112,7 @@ The following matrix documents identified project, technical, security, and oper
 
 ## 11. Non-Functional Requirements (NFR) Performance Budget
 
+### 11.1. End-to-End Response Latency Budget
 ```
 Total Response Latency Budget: <= 10.00 Seconds
 +-----------------------------------------------------------------------------------------+
@@ -1078,7 +1290,222 @@ gantt
 
 ---
 
-## 14. Architectural Open Questions & Decision Log (ADRs)
+### 13.4. Infrastructure as Code (IaC) Architecture & Directory Structure
+
+All cloud infrastructure, Kubernetes workloads, database clusters, security policies, and networking topologies are managed declaratively using **Terraform** and **Helm** with automated drift detection.
+
+#### 13.4.1. Terraform Repository Layout & Module Architecture
+```
+terraform/
+├── environments/
+│   ├── dev/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── terraform.tfvars
+│   ├── staging/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── terraform.tfvars
+│   └── prod/
+│       ├── backend.tf               # Remote state locking via GCS bucket + Cloud KMS
+│       ├── main.tf                  # Root module invoking reusable infrastructure modules
+│       ├── outputs.tf               # Ingress IPs, cluster endpoints, connection URIs
+│       ├── providers.tf             # Google, Kubernetes, Helm, Vault providers
+│       ├── terraform.tfvars         # Production variable overrides (machine types, quotas)
+│       └── variables.tf             # Variable type definitions & validation constraints
+└── modules/
+    ├── cloud_armor_waf/             # WAF rules: rate-limiting, IP allowlisting, DDoS protection
+    ├── cloud_sql_pgvector/          # HA PostgreSQL 16 cluster with pgvector extension & automated backups
+    ├── gke_cluster/                 # Private GKE Autopilot/Standard cluster with Workload Identity
+    ├── iam_service_accounts/        # Least-privilege IAM roles for Workload Identity Federation
+    ├── logging_audit_kms/           # Write-once audit bucket with Customer-Managed Encryption Keys
+    └── memorystore_redis/           # Managed in-memory Redis cluster with in-transit TLS & auth
+```
+
+#### 13.4.2. Kubernetes Helm Chart Hierarchy (`deploy/helm/hr-agent/`)
+```
+deploy/helm/hr-agent/
+├── Chart.yaml                       # Application Helm metadata & semantic versioning
+├── values.yaml                      # Base configuration defaults
+├── values-dev.yaml                  # Development resource limits (1 replica, smaller memory)
+├── values-staging.yaml              # Staging mirror of production with mock endpoints
+├── values-prod.yaml                 # Production values (HPA: min 3, max 15, PDB, node affinity)
+└── templates/
+    ├── _helpers.tpl                 # Template helper macros and standard labels
+    ├── deployment.yaml              # Agent Orchestrator & Ingress Gateway Pod spec
+    ├── service.yaml                 # ClusterIP service definition
+    ├── ingress.yaml                 # Managed Certificate & Cloud Armor Ingress annotation
+    ├── hpa.yaml                     # HorizontalPodAutoscaler (CPU 70%, Memory 75%)
+    ├── pdb.yaml                     # PodDisruptionBudget (minAvailable: 2)
+    ├── secret-provider.yaml         # External Secrets Operator integration (Vault / Secret Manager)
+    ├── network-policy.yaml          # Strict ingress/egress firewall rules for pods
+    └── cronjob-log-purge.yaml       # Nightly GDPR log purging CronJob (02:00 UTC)
+```
+
+---
+
+### 13.5. CI/CD Pipeline Strategy & Staged Deployment Lifecycles
+
+The application implements a zero-downtime, fully automated CI/CD pipeline orchestrated via **Cloud Build / GitHub Actions** with strict quality gates, security scanning, and automated canary verification.
+
+```mermaid
+flowchart LR
+    subgraph CI_Pipeline ["Continuous Integration (CI Pipeline)"]
+        Commit["Git Commit / PR"] --> Lint["Lint & Static Analysis (flake8, mypy, bandit)"]
+        Lint --> Unit["Unit & Mock Contract Tests (PyTest 100%)"]
+        Unit --> Scan["Security SAST & Container Scan (Trivy, SonarQube)"]
+        Scan --> EvalGate{"Automated Evaluation Gate (Grounding >= 95%, 0 Leaks)"}
+        EvalGate -->|Pass| Sign["Build & Sign Distroless Image (Cosign SLSA L3)"]
+    end
+
+    subgraph CD_Pipeline ["Continuous Deployment (CD Pipeline)"]
+        Sign --> DevDeploy["Deploy to Dev Cluster"]
+        DevDeploy --> E2ETests["Automated Saga & Adapter Integration Tests"]
+        E2ETests --> StagingCanary["Canary Release (10% Traffic in Staging)"]
+        StagingCanary --> PerfGate{"Canary Gate: P99 < 10s & 0 5xx Errors"}
+        PerfGate -->|Pass| ApprGate["Manual Change Advisory Board (CAB) Approval"]
+        ApprGate --> ProdBlueGreen["Blue/Green Production Rollout (100%)"]
+        ProdBlueGreen --> HealthMonitor{"Post-Deploy Monitor: Error Rate > 1%?"}
+        HealthMonitor -->|YES| Rollback["Automated Rollback to Previous Stable Replica"]
+        HealthMonitor -->|NO| Complete["Deployment Finalized & Monitored"]
+    end
+```
+
+#### 13.5.1. Pipeline Stages & Automated Gates
+1. **Stage 1: Lint, Typing & Static Security Analysis**: Enforces code styling via `black`, strict type validation via `mypy`, and security vulnerability scanning via `bandit`.
+2. **Stage 2: Unit & Mock Contract Test Suite**: Executes 150+ unit tests with 100% mocked backends. Verifies input validation, date calculators, and circuit breaker tripping.
+3. **Stage 3: Security & Vulnerability Scanning**: `Trivy` scans container images for CVEs (zero Critical/High tolerated); SonarQube verifies code maintainability and test coverage $>85\%$.
+4. **Stage 4: Automated AI Evaluation Quality Gate**: Runs the `agent-eval-guide` evaluation suite against 50 curated ground-truth scenarios. The build **fails automatically** if:
+   * Grounding entailment score $< 95\%$
+   * Any prompt injection probe bypasses the input filter ($>0\%$ leak rate)
+   * Average turn execution time exceeds $7.0\text{s}$
+5. **Stage 5: Secure Container Signing**: Generates minimal, hardened distroless container images signed cryptographically via `Cosign` with SLSA Level 3 provenance metadata.
+6. **Stage 6: Staging Canary Verification**: Deploys a canary pod handling 10% of synthetic traffic for 15 minutes. Automatically monitors Prometheus metrics for latency and error anomalies.
+7. **Stage 7: Production Blue/Green Zero-Downtime Deployment**: Routes traffic from Blue to Green revision via Kubernetes Service selector.
+8. **Automated Rollback Safeguards**: The deployment pipeline automatically rolls back within 60 seconds if post-deployment Prometheus monitors detect:
+   * $HTTP\ 5xx\ \text{Error Rate} > 1.0\%$ over a 3-minute rolling window.
+   * $P_{99}\ \text{Response Latency} > 8.0\text{s}$.
+   * CrashLoopBackOff or pod health check probe failures.
+
+---
+
+## 14. Future Extensibility: Evolution to Event-Driven Multi-Agent Choreography
+
+### 14.1. Architectural Evolution: From Single ReAct to Multi-Agent Choreography
+
+While the MVP 1 architecture leverages a centralized Single ReAct Orchestrator to ensure deterministic latency and simple operational management, future enterprise milestones (MVP 2 and MVP 3) require scaling to complex, long-running business workflows across multiple corporate domains. 
+
+As capabilities expand into **Global Payroll Adjustments**, **Equity & Stock Vesting Inquiries**, **Automated Employee Relocation**, and **Hardware Lifecycle Logistics**, maintaining a single orchestrator creates bloated tool registries, token context dilution, and tight inter-domain coupling.
+
+The target future-state architecture transitions to a **Decentralized, Event-Driven Multi-Agent Choreography** powered by an enterprise event streaming backbone (Apache Kafka / Google Cloud Pub/Sub) and the **Google Agent-to-Agent (A2A)** communication protocol.
+
+```mermaid
+flowchart TD
+    subgraph Client_Tier ["Conversational Ingress"]
+        ClientUI["Enterprise Employee Chat UI"]
+        Gateway["Ingress Gateway & Session Router"]
+    end
+
+    subgraph Event_Backbone ["Event Streaming Backbone (Kafka / PubSub)"]
+        Topic_Req[("agent.requests.inbound")]
+        Topic_Leave[("hr.leave.events")]
+        Topic_IT[("it.service.events")]
+        Topic_Payroll[("payroll.comp.events")]
+        Topic_Audit[("enterprise.audit.events")]
+    end
+
+    subgraph Specialized_Agents ["Specialized Domain Agents (A2A Compatible)"]
+        Supervisor["Conversational Supervisor & Router Agent"]
+        PolicyAgent["HR Policy & Legal Reasoning Agent"]
+        LeaveAgent["Leave & PTO Management Agent"]
+        ITServiceAgent["IT Service & Incident Agent"]
+        PayrollAgent["Payroll & Compensation Agent (MVP 2)"]
+    end
+
+    subgraph External_Systems ["Authoritative Enterprise Systems"]
+        WW[("WorkWeek HCM")]
+        SI[("ServiceImmediately ITSM")]
+        SAP[("SAP Payroll ERP")]
+        VectorStore[("Policy pgvector")]
+    end
+
+    ClientUI <-->|WebSocket| Gateway
+    Gateway <--> Topic_Req
+    Topic_Req <--> Supervisor
+
+    Supervisor -.->|A2A Protocol / gRPC| PolicyAgent
+    Supervisor -.->|A2A Protocol / gRPC| LeaveAgent
+    Supervisor -.->|A2A Protocol / gRPC| ITServiceAgent
+    Supervisor -.->|A2A Protocol / gRPC| PayrollAgent
+
+    PolicyAgent <--> VectorStore
+    LeaveAgent <--> Topic_Leave
+    ITServiceAgent <--> Topic_IT
+    PayrollAgent <--> Topic_Payroll
+
+    Topic_Leave <--> WW
+    Topic_IT <--> SI
+    Topic_Payroll <--> SAP
+
+    LeaveAgent -.->|Publish Event| Topic_Audit
+    ITServiceAgent -.->|Publish Event| Topic_Audit
+    PayrollAgent -.->|Publish Event| Topic_Audit
+```
+
+---
+
+### 14.2. Specialized Domain Agent Archetypes & Responsibilities
+
+| Specialized Sub-Agent | Core Domain Responsibilities | Bound Tools / Backends | Communication Protocol |
+| :--- | :--- | :--- | :--- |
+| **Conversational Supervisor Agent** | Intent classification, user sentiment tracking, conversational context maintenance, multi-agent dispatch, response aggregation. | Ingress Gateway, Redis Session Memory | WebSocket ingress; gRPC / A2A dispatch |
+| **HR Policy Agent** | Semantic policy reasoning, document chunk retrieval, deep link synthesis, strict hallucination verification. | `search_hr_policies`, `pgvector` store | Asynchronous A2A Query-Reply |
+| **Leave Management Agent** | PTO accruals, validation rules, leave balance ledger management, WorkWeek transactional integration. | `workweek_*` tool adapters | Event-driven consumer on `hr.leave.events` |
+| **IT Service & Assets Agent** | Incident creation, hardware catalog ordering, ticket status tracking, ServiceImmediately adapter. | `serviceimmediately_*` adapters | Event-driven consumer on `it.service.events` |
+| **Compensation & Payroll Agent (MVP 2)** | Direct deposit updates, tax withholding queries, paystub retrieval, salary band verification. | SAP ERP / Workday Payroll API | Two-phase commit transactional bus |
+
+---
+
+### 14.3. Standardized CloudEvents Data Contracts & Choreographed Sagas
+
+Communication between asynchronous agents across the event backbone utilizes the **CloudEvents v1.0** specification, enabling structured payload validation, tracing, and replayability:
+
+```json
+{
+  "specversion": "1.0",
+  "type": "com.enterprise.hr.leave.requested",
+  "source": "urn:agent:orchestration:supervisor",
+  "id": "evt-leave-req-99482-af",
+  "time": "2026-09-02T10:15:30Z",
+  "datacontenttype": "application/json",
+  "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+  "data": {
+    "saga_id": "saga-med-leave-20260902-88392",
+    "employee_id": "emp_8839201",
+    "leave_type": "Medical_Sick",
+    "start_date": "2026-09-07",
+    "end_date": "2026-09-18",
+    "days_requested": 10,
+    "contingent_actions": [
+      {
+        "target_domain": "IT_SERVICE",
+        "action": "DELEGATE_CREDENTIALS",
+        "parameters": { "delegatee_id": "emp_mgr_10293" }
+      }
+    ]
+  }
+}
+```
+
+#### 14.3.1. Choreographed Asynchronous Saga Execution
+1. **Event Publishing**: The Supervisor Agent publishes `com.enterprise.hr.leave.requested` to `hr.leave.events`.
+2. **Autonomous Execution**: The Leave Management Agent consumes the event, validates balances in WorkWeek, and commits the leave. It then publishes `com.enterprise.hr.leave.committed`.
+3. **Triggered Downstream Action**: The IT Service Agent reacts to `com.enterprise.hr.leave.committed`, opening the routing ticket in ServiceImmediately.
+4. **Autonomous Compensation on Failure**: If the IT ticket creation encounters an irrecoverable error, the IT Service Agent emits `com.enterprise.it.delegation.failed`. The Leave Management Agent reacts to this event and executes the compensating transaction in WorkWeek (`cancel_leave`), maintaining global state consistency asynchronously without blocking the user's interactive session.
+
+---
+
+## 15. Architectural Open Questions & Decision Log (ADRs)
 
 | ADR ID | Context & Decision Subject | Final Resolution & Decision | Status |
 | :--- | :--- | :--- | :---: |
@@ -1089,7 +1516,9 @@ gantt
 
 ---
 
-## 15. Appendices & References
+---
+
+## 16. Appendices & References
 
 * **BRD Reference**: [HR_Agentic_Solution_BRD.md](HR_Agentic_Solution_BRD.md) — Business Requirements Document for HR Agentic Solution (MVP 1)
 * **Architecture Standard**: IEEE 1016-2009 (Standard for Information Technology - Systems Design - Software Design Descriptions)
