@@ -33,11 +33,12 @@ def select_tools(mode: str):
     if not tools:
         raise ValueError(f"Unknown RETRIEVAL_MODE: {mode!r} (use okf | rag | hybrid)")
 
-    # Enterprise Systems Integration via Google ADK McpToolset
-    from .tools.mcp_tool import get_mcp_toolset
-    tools.append(get_mcp_toolset())
+    # Enterprise Systems Integration via Google ADK McpToolset (WorkWeek + ServiceImmediately)
+    from .tools.mcp_tool import get_mcp_toolsets
+    tools.extend(get_mcp_toolsets())
 
     return tools
+
 
 
 # ===========================================================================

@@ -26,8 +26,11 @@ VERTEX_AI_DATA_STORE_ID = os.getenv("VERTEX_AI_DATA_STORE_ID", "hr-policies-lab-
 VERTEX_AI_SEARCH_ENGINE_ID = os.getenv("VERTEX_AI_SEARCH_ENGINE_ID", "hr-policies-lab-engine")
 
 # --- Enterprise Systems MCP Integration -----------------------------------
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "https://mock-saas.aishprabhat.demo.altostrat.com/").rstrip("/")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "https://mock-saas.aishprabhat.demo.altostrat.com").rstrip("/")
+MCP_WORKWEEK_URL = os.getenv("MCP_WORKWEEK_URL", f"{MCP_SERVER_URL}/work-week/mcp/")
+MCP_SERVICEIMMEDIATELY_URL = os.getenv("MCP_SERVICEIMMEDIATELY_URL", f"{MCP_SERVER_URL}/service-immediately/mcp/")
 MCP_SERVER_TOKEN = os.getenv("MCP_SERVER_TOKEN", "mcp_w7e9kli_R2CJUChBjPBaNzHWhAKtbnLrRqx1JNlMo3Q")
 DEFAULT_EMPLOYEE_ID = os.getenv("DEFAULT_EMPLOYEE_ID", "EMP-1042")
 
 APP_NAME = "hr_policy_lab"
+

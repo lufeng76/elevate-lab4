@@ -16,42 +16,61 @@ from .. import config
 logger = logging.getLogger("mcp_tool")
 
 
-def get_mcp_toolset(
-    transport: str = "sse",
+def get_workweek_mcp_toolset(
     url: Optional[str] = None,
     token: Optional[str] = None,
 ) -> McpToolset:
-    """Create and return an ADK McpToolset instance configured for the remote MCP server.
-
-    Args:
-        transport: 'sse' (Server-Sent Events) or 'streamable_http'.
-        url: MCP server base URL (defaults to config.MCP_SERVER_URL).
-        token: MCP server auth token (defaults to config.MCP_SERVER_TOKEN).
-
-    Returns:
-        google.adk.tools.McpToolset
-    """
-    server_url = (url or config.MCP_SERVER_URL).rstrip("/")
-    server_token = token or config.MCP_SERVER_TOKEN
-
-    headers = {
-        "Authorization": f"Bearer {server_token}",
-        "X-MCP-Token": server_token,
-        "mcp-token": server_token,
-    }
-
-    if transport == "streamable_http":
-        connection_params = StreamableHTTPConnectionParams(
-            url=f"{server_url}/mcp",
-            headers=headers,
-            timeout=10.0,
+    """Return McpToolset for the WorkWeek employee & leave management server."""
+    endpoint = url or config.MCP_WORKWEEK_URL
+    auth_token = token or config.MCP_SERVER_TOKEN
+    return McpToolset(
+        connection_params=StreamableHTTPConnectionParams(
+            url=endpoint,
+            headers={"X-MCP-Token": auth_token},
+            timeout=15.0,
         )
-    else:
-        # Default: Server-Sent Events (SSE) transport
-        connection_params = SseConnectionParams(
-            url=f"{server_url}/sse",
-            headers=headers,
-            timeout=10.0,
-        )
+    )
 
-    return McpToolset(connection_params=connection_params)
+
+def get_serviceimmediately_mcp_toolset(
+    url: Optional[str] = None,
+    token: Optional[str] = None,
+) -> McpToolset:
+    """Return McpToolset for the ServiceImmediately ITMS/HRSD ticket tracking server."""
+    endpoint = url or config.MCP_SERVICEIMMEDIATELY_URL
+    auth_token = token or config.MCP_SERVER_TOKEN
+    return McpToolset(
+        connection_params=StreamableHTTPConnectionParams(
+            url=endpoint,
+            headers={"X-MCP-Token": auth_token},
+            timeout=15.0,
+        )
+    )
+
+
+def get_mcp_toolsets(
+    token: Optional[str] = None,
+) -> list[McpToolset]:
+    """Return both enterprise MCP toolsets (WorkWeek and ServiceImmediately)."""
+    return [
+        get_workweek_mcp_toolset(token=token),
+        get_serviceimmediately_mcp_toolset(token=token),
+    ]
+
+
+def get_mcp_toolset(
+    transport: str = "streamable_http",
+    url: Optional[str] = None,
+    token: Optional[str] = None,
+) -> McpToolset:
+    """Backwards-compatible helper returning the WorkWeek toolset or specified endpoint."""
+    target_url = url or config.MCP_WORKWEEK_URL
+    auth_token = token or config.MCP_SERVER_TOKEN
+    return McpToolset(
+        connection_params=StreamableHTTPConnectionParams(
+            url=target_url,
+            headers={"X-MCP-Token": auth_token},
+            timeout=15.0,
+        )
+    )
+
