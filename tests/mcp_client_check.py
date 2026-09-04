@@ -8,9 +8,12 @@ If arguments are omitted, defaults to the configured WorkWeek endpoint and token
 import asyncio
 import os
 import sys
+from dotenv import load_dotenv
 import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+
+load_dotenv()
 
 DEFAULT_URL = os.getenv(
     "MCP_WORKWEEK_URL",
