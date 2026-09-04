@@ -13,12 +13,14 @@ logger = logging.getLogger(__name__)
 # Prompt injection signature patterns
 PROMPT_INJECTION_PATTERNS = [
     re.compile(r"ignore\s+(all\s+)?(previous|prior)\s+instructions?", re.IGNORECASE),
-    re.compile(r"system\s+prompt\s+(override|leak|reveal|show)", re.IGNORECASE),
-    re.compile(r"\b(dan\s+mode|jailbreak|developer\s+mode)\b", re.IGNORECASE),
-    re.compile(r"you\s+are\s+now\s+(unconstrained|an\s+unfiltered)", re.IGNORECASE),
+    re.compile(r"system\s+(prompt|instruction|rule)?s?\s*(override|leak|reveal|show|disabled)", re.IGNORECASE),
+    re.compile(r"\b(dan(\s+mode)?|do\s+anything\s+now|jailbreak|developer\s+mode)\b", re.IGNORECASE),
+    re.compile(r"you\s+are\s+now\s+(unconstrained|an\s+unfiltered|dan\b)", re.IGNORECASE),
     re.compile(r"disregard\s+(the\s+)?(rules|constraints|instructions)", re.IGNORECASE),
     re.compile(r"output\s+(your\s+)?initial\s+prompt", re.IGNORECASE),
     re.compile(r"reveal\s+(internal|hidden)\s+(instructions|prompt)", re.IGNORECASE),
+    re.compile(r"(curl|wget)\s+.*\|\s*(bash|sh)", re.IGNORECASE),
+    re.compile(r"\b(execute\s+this\s+(shell|bash|command)|sudo\s+rm|format\s+c:)\b", re.IGNORECASE),
 ]
 
 # Toxic or malicious payload indicators
