@@ -1,7 +1,7 @@
 # HR Agentic Solution (MVP 1)
 
 [![Architecture Compliance](https://img.shields.io/badge/SDD_Compliance-100%25-brightgreen.svg)](#architecture--component-topology)
-[![Tests](https://img.shields.io/badge/Unit_Tests-23%2F23_Passed-success.svg)](#testing--verification)
+[![Tests](https://img.shields.io/badge/Unit_Tests-26%2F26_Passed-success.svg)](#testing--verification)
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
 [![Google ADK](https://img.shields.io/badge/Google_ADK-2.4.0-orange.svg)](https://github.com/google/adk)
 
@@ -129,7 +129,8 @@ flowchart TD
 │   │   └── rag_tool.py            # Vertex AI Search RAG engine
 │   ├── agent.py                   # Core ADK LlmAgent entry point & runner
 │   ├── config.py                  # Environment and model configuration
-│   └── prompt.py                  # Grounded system instructions
+│   ├── prompt.py                  # Grounded system instructions
+│   └── server.py                  # Production REST API & /healthz probe server
 ├── evals/                         # 4-Tier Golden dataset evaluation harness
 │   ├── golden/
 │   │   ├── eval_config.json
@@ -143,9 +144,10 @@ flowchart TD
 │   ├── test_okf_rag.py
 │   ├── test_safety.py
 │   ├── test_sagas.py
+│   ├── test_server.py
 │   └── mcp_client_check.py
 ├── Dockerfile                     # Hardened container definition
-├── Makefile                       # Automation targets (test, lint, eval, run)
+├── Makefile                       # Automation targets (test, lint, eval, run, serve)
 ├── pyproject.toml                 # Dependencies and tool configurations
 └── README.md
 ```
@@ -198,7 +200,17 @@ make run
 python -m agent.agent --interactive
 ```
 
-### 5. Run Golden Evaluation Dataset
+### 5. Production HTTP Server & Healthcheck Probe
+```bash
+make serve
+# or directly:
+python -m agent.server
+```
+- Health Probe: `GET /healthz` $\rightarrow$ `{"status": "healthy", "service": "hr_policy_agent", "version": "1.0.0"}`
+- Service Info: `GET /` $\rightarrow$ Service metadata
+- Ingress Chat API: `POST /api/v1/chat` $\rightarrow$ `{"query": "...", "user_id": "EMP-1042"}`
+
+### 6. Run Golden Evaluation Dataset
 ```bash
 make eval
 ```
@@ -212,6 +224,8 @@ Build and run the hardened, non-root production container:
 make docker-build
 docker run -p 8080:8080 --env-file .env hr-policy-agent:latest
 ```
+
+The container automatically starts the HTTP server on port `8080` (or `$PORT`) and responds to Docker / Cloud Run healthcheck probes (`curl -f http://localhost:8080/healthz`).
 
 ---
 

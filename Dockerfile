@@ -37,7 +37,7 @@ USER appuser
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/healthz || exit 0
+HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/healthz || exit 1
 
-CMD ["python", "-m", "agent.agent", "--interactive"]
+CMD ["python", "-m", "agent.server"]

@@ -22,6 +22,9 @@ eval:
 run:
 	$(PYTHON) -m agent.agent --interactive
 
+serve:
+	$(PYTHON) -m agent.server
+
 check: test
 	$(PYTHON) -m py_compile agent/*.py agent/**/*.py tests/*.py
 
