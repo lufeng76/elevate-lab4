@@ -26,6 +26,6 @@ evals/history.jsonl
 
 # Demo recording binaries
 demo_production/raw_video/
-demo_production/*.mp4
 demo_production/*.webm
 demo_production/*.mp3
+!demo_production/altostrat_agent_demo.mp4

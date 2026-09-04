@@ -1,13 +1,18 @@
 # HR Agentic Solution (MVP 1)
 
 [![Architecture Compliance](https://img.shields.io/badge/SDD_Compliance-100%25-brightgreen.svg)](#architecture--component-topology)
-[![Tests](https://img.shields.io/badge/Unit_Tests-26%2F26_Passed-success.svg)](#testing--verification)
+[![Tests](https://img.shields.io/badge/Unit_Tests-30%2F30_Passed-success.svg)](#testing--verification)
+[![Benchmark](https://img.shields.io/badge/Benchmark-20%2F20_Passed_(100%25)-success.svg)](#testing--verification)
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
 [![Google ADK](https://img.shields.io/badge/Google_ADK-2.4.0-orange.svg)](https://github.com/google/adk)
+[![Cloud Run](https://img.shields.io/badge/Cloud_Run-Live_Deployed-blue.svg)](https://hr-policy-agent-lab-988469099469.us-central1.run.app/)
 
 An enterprise-grade, conversational AI solution designed to automate Tier 1 Human Resources (HR) and Information Technology (IT) inquiries, streamline self-service transactional workflows, and coordinate multi-step cross-system sagas.
 
-Built strictly in conformance with the **[Software Design Document (SDD)](HR_Agentic_Solution_SDD.md)** and Google ADK.
+Built strictly in conformance with the **[Software Design Document (SDD)](HR_Agentic_Solution_SDD.md)**, the **[As-Built Architecture Document](ARCHITECTURE_DESIGN_DOCUMENT.md)**, and Google ADK.
+
+* 🌐 **Live Web Application:** [https://hr-policy-agent-lab-988469099469.us-central1.run.app/](https://hr-policy-agent-lab-988469099469.us-central1.run.app/)
+* 🎬 **Walkthrough Demo Video (MP4):** [`demo_production/altostrat_agent_demo.mp4`](demo_production/altostrat_agent_demo.mp4) (1m 47s, 720p HD with synchronized neural voiceover)
 
 ---
 
