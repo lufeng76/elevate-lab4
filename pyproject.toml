@@ -19,9 +19,34 @@ lint = [
     "ruff>=0.5.0",
     "mypy>=1.10.0",
     "codespell>=2.3.0",
+    "types-PyYAML>=6.0.12",
+]
+test = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
 ]
 
 # This is an application, not a library — don't try to build/install the repo
 # itself; uv just manages the environment and its dependencies.
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_configs = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+

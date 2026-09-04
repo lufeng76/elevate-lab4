@@ -129,8 +129,51 @@ async def _ensure_session_async(user_id, session_id):
 
 
 async def _run_query_traced_async(query, user_id, session_id):
+    import time
     from google.genai import types
 
+    from .security import (
+        AuditLogger,
+        GroundingEvaluator,
+        IdentityContextInjector,
+        InputSafetyFilter,
+        OutputSafetyFilter,
+    )
+
+    start_time = time.perf_counter()
+
+    # 1. Identity context extraction & revocation check (SDD 6.1.1 & 9.1.1)
+    if IdentityContextInjector.is_revoked(user_id):
+        refusal = "Authentication session expired or revoked. Please re-authenticate."
+        AuditLogger.emit(
+            session_id=session_id,
+            user_id=user_id,
+            action_type="SECURITY_REVOCATION_BLOCK",
+            payload={"query": query},
+            status="BLOCKED",
+            latency_ms=(time.perf_counter() - start_time) * 1000,
+        )
+        return refusal, []
+
+    IdentityContextInjector.create_context(user_id=user_id, session_id=session_id)
+
+    # 2. Input Safety Guardrail (SDD 4.2.1 - prompt injection / boundary scan)
+    input_filter = InputSafetyFilter()
+    input_check = input_filter.validate(query, user_id=user_id)
+    if not input_check.is_safe:
+        refusal = input_check.sanitized_output or "Request blocked by safety policy."
+        AuditLogger.emit(
+            session_id=session_id,
+            user_id=user_id,
+            action_type="SECURITY_INPUT_BLOCK",
+            payload={"query": query, "reason": input_check.reason},
+            safety_evaluation={"input_guard_passed": False, "violation": input_check.violation_category},
+            status="BLOCKED",
+            latency_ms=(time.perf_counter() - start_time) * 1000,
+        )
+        return refusal, []
+
+    # 3. Agent Reasoning & Tool Loop
     runner = _ensure_runner()
     await _ensure_session_async(user_id, session_id)
     message = types.Content(role="user", parts=[types.Part(text=query)])
@@ -149,7 +192,36 @@ async def _run_query_traced_async(query, user_id, session_id):
             texts = [p.text for p in event.content.parts if getattr(p, "text", None)]
             if texts:
                 final = "\n".join(texts)
-    return final, evidence
+
+    # 4. Grounding Verification Layer (SDD 4.2.2 & NFR-3.1)
+    grounding_eval = GroundingEvaluator()
+    grounding_res = grounding_eval.evaluate(final, evidence)
+
+    # 5. Output Safety Guardrail & SPII Redaction (SDD 4.2.2 & 4.3.2)
+    output_filter = OutputSafetyFilter()
+    output_check = output_filter.validate(final)
+    sanitized_final = (
+        output_check.sanitized_output if output_check.sanitized_output is not None else final
+    )
+
+    # 6. Structured Immutable Audit Telemetry (SDD 9.2)
+    latency = (time.perf_counter() - start_time) * 1000
+    AuditLogger.emit(
+        session_id=session_id,
+        user_id=user_id,
+        action_type="USER_TURN_COMPLETED",
+        payload={"query": query, "response": sanitized_final},
+        safety_evaluation={
+            "input_guard_passed": True,
+            "output_guard_passed": output_check.is_safe,
+            "grounding_score": grounding_res.score,
+            "is_grounded": grounding_res.is_grounded,
+        },
+        status="SUCCESS" if output_check.is_safe else "BLOCKED",
+        latency_ms=latency,
+    )
+
+    return sanitized_final, evidence
 
 
 def run_query(query: str, user_id: str = "learner", session_id: str = "session-1") -> str:
