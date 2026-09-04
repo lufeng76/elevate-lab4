@@ -6,11 +6,14 @@ first list what concepts exist, then read the most relevant one. No vector DB.
 You implement two functions. Keep the return shapes exactly as documented — the
 prompt and the agent rely on them.
 """
+import logging
 import os
 import re
 import yaml
 
 from .. import config  # config.KNOWLEDGE_DIR points at the knowledge/ bundle
+
+logger = logging.getLogger(__name__)
 
 RESERVED = {"index.md", "log.md"}
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
@@ -61,7 +64,18 @@ def list_concepts() -> dict:
                     "title": title,
                     "description": description,
                 })
-            except Exception:
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning(
+                    "I/O error reading concept file %s: %s; skipping.", path, e
+                )
+                continue
+            except Exception as e:
+                logger.error(
+                    "Unexpected error processing concept file %s: %s; skipping.",
+                    path,
+                    e,
+                    exc_info=True,
+                )
                 continue
 
     concepts.sort(key=lambda c: c["id"])
@@ -114,9 +128,26 @@ def read_concept(concept_id: str) -> dict:
             "title": title,
             "resource": resource,
         }
-    except Exception as e:
+    except (OSError, UnicodeDecodeError) as e:
+        logger.error(
+            "I/O error reading concept %r at %s: %s", concept_id, target_path, e
+        )
         return {
             "error": f"Error reading concept '{concept_id}': {e}",
+            "content": "",
+            "title": "",
+            "resource": None,
+        }
+    except Exception as e:
+        logger.error(
+            "Unexpected error reading concept %r at %s: %s",
+            concept_id,
+            target_path,
+            e,
+            exc_info=True,
+        )
+        return {
+            "error": f"Unexpected error reading concept '{concept_id}': {e}",
             "content": "",
             "title": "",
             "resource": None,

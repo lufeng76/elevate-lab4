@@ -5,10 +5,14 @@ a Vertex AI Search data store (see rag/). It returns grounded context + citation
 
 Prerequisite: complete rag/README.md (terraform apply, ingest, verify) first.
 """
+import logging
 from google.api_core.client_options import ClientOptions
+from google.api_core.exceptions import GoogleAPICallError, RetryError
 from google.cloud import discoveryengine_v1 as discoveryengine
 
 from .. import config
+
+logger = logging.getLogger(__name__)
 
 
 def search_policy_docs(query: str) -> dict:
@@ -99,9 +103,39 @@ def search_policy_docs(query: str) -> dict:
             "citations": citations,
         }
 
-    except Exception as e:
+    except (GoogleAPICallError, RetryError) as e:
+        logger.error(
+            "Vertex AI Search API call failed for query %r (project=%s, engine=%s): %s",
+            query,
+            project_id,
+            engine_id,
+            e,
+            exc_info=True,
+        )
         return {
-            "grounded_context": f"Error searching policy documents: {e}",
+            "grounded_context": f"Vertex AI Search API error: {e}",
+            "citations": [],
+        }
+    except (KeyError, AttributeError, ValueError) as e:
+        logger.error(
+            "Data structure parsing error processing Vertex AI Search results for query %r: %s",
+            query,
+            e,
+            exc_info=True,
+        )
+        return {
+            "grounded_context": f"Error parsing policy search response: {e}",
+            "citations": [],
+        }
+    except Exception as e:
+        logger.error(
+            "Unexpected error in search_policy_docs for query %r: %s",
+            query,
+            e,
+            exc_info=True,
+        )
+        return {
+            "grounded_context": f"Unexpected error searching policy documents: {e}",
             "citations": [],
         }
 

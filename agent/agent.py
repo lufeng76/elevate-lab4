@@ -10,12 +10,15 @@ Run it:
     uv run adk web .            # then pick "agent" in the web UI
 """
 import asyncio
+import logging
 import sys
 
 from google.adk.agents import LlmAgent  # noqa: F401  (used in the TODO block)
 
 from . import config
 from .prompt import POLICY_AGENT_PROMPT
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -89,13 +92,40 @@ def _ensure_runner():
 
 
 async def _ensure_session_async(user_id, session_id):
-    """Create the session via the async API (the *_sync helpers are deprecated)."""
+    """Ensure the session exists via the async API, avoiding silent failures and preserving traces."""
+    from google.adk.errors.already_exists_error import AlreadyExistsError
+
+    # First verify if session already exists
+    session = await _session_service.get_session(
+        app_name=config.APP_NAME, user_id=user_id, session_id=session_id
+    )
+    if session is not None:
+        return session
+
     try:
-        await _session_service.create_session(
+        return await _session_service.create_session(
             app_name=config.APP_NAME, user_id=user_id, session_id=session_id
         )
-    except Exception:
-        pass  # already exists
+    except AlreadyExistsError:
+        logger.debug(
+            "Session %s for user %s already exists in %s.",
+            session_id,
+            user_id,
+            config.APP_NAME,
+        )
+        return await _session_service.get_session(
+            app_name=config.APP_NAME, user_id=user_id, session_id=session_id
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to initialize session %s for user %s in %s: %s",
+            session_id,
+            user_id,
+            config.APP_NAME,
+            e,
+            exc_info=True,
+        )
+        raise
 
 
 async def _run_query_traced_async(query, user_id, session_id):

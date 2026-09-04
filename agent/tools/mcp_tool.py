@@ -16,6 +16,16 @@ from .. import config
 logger = logging.getLogger("mcp_tool")
 
 
+def _build_mcp_headers(token: Optional[str]) -> dict[str, str]:
+    """Construct HTTP headers for MCP endpoint requests, warning if token is absent."""
+    if not token:
+        logger.warning(
+            "MCP authentication token is not configured. Enterprise SaaS MCP calls may fail authentication."
+        )
+        return {}
+    return {"X-MCP-Token": token}
+
+
 def get_workweek_mcp_toolset(
     url: Optional[str] = None,
     token: Optional[str] = None,
@@ -26,7 +36,7 @@ def get_workweek_mcp_toolset(
     return McpToolset(
         connection_params=StreamableHTTPConnectionParams(
             url=endpoint,
-            headers={"X-MCP-Token": auth_token},
+            headers=_build_mcp_headers(auth_token),
             timeout=15.0,
         )
     )
@@ -42,7 +52,7 @@ def get_serviceimmediately_mcp_toolset(
     return McpToolset(
         connection_params=StreamableHTTPConnectionParams(
             url=endpoint,
-            headers={"X-MCP-Token": auth_token},
+            headers=_build_mcp_headers(auth_token),
             timeout=15.0,
         )
     )
@@ -69,7 +79,7 @@ def get_mcp_toolset(
     return McpToolset(
         connection_params=StreamableHTTPConnectionParams(
             url=target_url,
-            headers={"X-MCP-Token": auth_token},
+            headers=_build_mcp_headers(auth_token),
             timeout=15.0,
         )
     )

@@ -16,10 +16,7 @@ DEFAULT_URL = os.getenv(
     "MCP_WORKWEEK_URL",
     "https://mock-saas.aishprabhat.demo.altostrat.com/work-week/mcp/",
 )
-DEFAULT_TOKEN = os.getenv(
-    "MCP_SERVER_TOKEN",
-    "mcp_w7e9kli_R2CJUChBjPBaNzHWhAKtbnLrRqx1JNlMo3Q",
-)
+DEFAULT_TOKEN = os.getenv("MCP_SERVER_TOKEN", "")
 
 
 async def check_mcp_server(mcp_url: str, token: str):
@@ -54,6 +51,13 @@ async def check_mcp_server(mcp_url: str, token: str):
 def main():
     mcp_url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_URL
     token = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_TOKEN
+    if not token:
+        print(
+            "Error: MCP token is required. Provide it as an argument or set MCP_SERVER_TOKEN.\n"
+            "Usage: python tests/mcp_client_check.py <mcp_url> <token>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     asyncio.run(check_mcp_server(mcp_url, token))
 
 
