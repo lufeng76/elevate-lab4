@@ -1,0 +1,17 @@
+{
+  "raw_video": "/usr/local/google/home/lufengsh/ai_advanced/lab4/elevate-lab4/demo_production/raw_video/page@8e355f0d16528ef8f99dfe34e1e6db04.webm",
+  "scene_start_times": {
+    "scene1_intro": 5.412101745605469e-05,
+    "scene2_policy": 21.280386924743652,
+    "scene3_mcp": 54.12760829925537,
+    "scene4_security": 75.54390954971313,
+    "scene5_conclusion": 94.99222588539124
+  },
+  "durations": {
+    "scene1_intro": 20.28,
+    "scene2_policy": 22.2,
+    "scene3_mcp": 19.416,
+    "scene4_security": 17.448,
+    "scene5_conclusion": 12.792
+  }
+}
