@@ -1,4 +1,4 @@
-.PHONY: help install test lint format eval run docker-build clean
+.PHONY: help install test lint format eval run serve deploy docker-build clean
 
 PYTHON ?= .venv/bin/python
 PYTEST ?= .venv/bin/pytest
@@ -9,6 +9,8 @@ help:
 	@echo "make test         Run automated unit and integration tests"
 	@echo "make eval         Execute 4-tier golden evaluation dataset"
 	@echo "make run          Launch conversational agent in interactive mode"
+	@echo "make serve        Start production HTTP server with /healthz probe"
+	@echo "make deploy       Deploy agent to Cloud Run using agents-cli"
 	@echo "make check        Run code syntax verification and tests"
 	@echo "make docker-build Build hardened production container image"
 	@echo "make clean        Remove cache and compiled bytecode artifacts"
@@ -24,6 +26,9 @@ run:
 
 serve:
 	$(PYTHON) -m agent.server
+
+deploy:
+	agents-cli deploy --project $$(gcloud config get-value project) --region us-central1
 
 check: test
 	$(PYTHON) -m py_compile agent/*.py agent/**/*.py tests/*.py

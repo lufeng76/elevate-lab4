@@ -1,0 +1,13 @@
+.gcloudignore
+.git
+.gitignore
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+.terraform/
+*.tfstate*
+evals/last_run.json
+evals/history.jsonl
+uv.lock

@@ -37,6 +37,7 @@ try:
         session_id: str
 
     @app.get("/healthz")
+    @app.get("/health")
     def healthz():
         """Container healthcheck probe returning 200 OK."""
         return {
