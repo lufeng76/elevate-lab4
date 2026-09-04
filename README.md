@@ -168,7 +168,7 @@ Edit `.env` with your Google Cloud and MCP settings:
 GOOGLE_GENAI_USE_VERTEXAI=true
 GOOGLE_CLOUD_PROJECT=your-project-id
 GOOGLE_CLOUD_LOCATION=global
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3.5-flash
 RETRIEVAL_MODE=okf
 
 # Enterprise Systems MCP Integration
